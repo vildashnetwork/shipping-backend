@@ -3,12 +3,13 @@ import dotenv from "dotenv"
 import mongoose from "mongoose";
 import cors from "cors"
 import adminlogin from "./routes/adminlogin.js"
+import shipments from "./routes/shipment.js"
 dotenv.config()
 const app = e();
 
 app.use(e.json())
 app.use(cors())
-
+app.use("/shipments", shipments)
 app.use("/auth", adminlogin)
 
 const connect = async () => {
