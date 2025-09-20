@@ -9,7 +9,7 @@ const app = e();
 app.use(e.json())
 app.use(cors())
 
-app.use("/auth/login", adminlogin)
+app.use("/auth", adminlogin)
 
 const connect = async () => {
     try {
