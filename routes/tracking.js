@@ -29,31 +29,41 @@ router.get('/:code', async (req, res) => {
     }
 });
 
-function addFooter(doc, pageNumber, trackingNumber) {
+function addFooterSmall(doc, pageNumber, trackingNumber, publicTrackingUrl) {
   try {
-    const bottomY = doc.page.height - 40;
-    doc.fontSize(8)
-      .font('Helvetica')
-      .fillColor('#666666')
-      .text(`Starwood Express Logistics • ${trackingNumber}`, 50, bottomY, { align: 'left' })
-      .text(`Page ${pageNumber} • Generated: ${new Date().toLocaleString()}`, 50, bottomY, { align: 'right' });
+    const bottomY = doc.page.height - 48;
+    doc.fontSize(8).font('Helvetica').fillColor('#666666');
+    doc.text(`Starwood Express Logistics • ${trackingNumber}`, 50, bottomY, { align: 'left' });
+    doc.text(`Page ${pageNumber} • Generated: ${new Date().toLocaleString()}`, 50, bottomY, { align: 'right' });
 
-    // subtle watermark (text-only)
+    // small watermark text-only, very faint
     doc.save()
-      .opacity(0.03)
-      .fontSize(80)
+      .opacity(0.02)
+      .fontSize(60)
       .font('Helvetica-Bold')
       .fillColor('#000000')
       .rotate(-45, { origin: [doc.page.width / 2, doc.page.height / 2] })
-      .text('CONFIDENTIAL', doc.page.width / 2 - 220, doc.page.height / 2 - 40, { align: 'center' })
+      .text('CONFIDENTIAL', doc.page.width / 2 - 200, doc.page.height / 2 - 40, { align: 'center' })
       .rotate(45, { origin: [doc.page.width / 2, doc.page.height / 2] })
       .restore();
+
+    // Small tracking link at footer center (shortened)
+    if (publicTrackingUrl) {
+      const shortUrl = publicTrackingUrl.length > 80 ? `${publicTrackingUrl.slice(0, 77)}...` : publicTrackingUrl;
+      doc.fontSize(7).fillColor('#666666').text(shortUrl, 50, bottomY + 12, { align: 'center', width: doc.page.width - 100 });
+    }
   } catch (e) {
-    // do not throw; watermark/footer are non-critical
-    console.warn('Footer/watermark draw failed:', e.message);
+    console.warn('Footer draw skipped:', e.message);
   }
 }
 
+// Utility to draw a two-column label/value pair with alignment
+function drawKeyVal(doc, xLabel, xValue, y, label, value) {
+  doc.fontSize(9).font('Helvetica').fillColor('#666666').text(label + ':', xLabel, y);
+  doc.font('Helvetica-Bold').fillColor('#333333').text(String(value ?? '-'), xValue, y);
+}
+
+// Route: returns a 2-page PDF (attachment) for a tracking code
 router.get('/:code/pdf', async (req, res) => {
   let doc;
   try {
@@ -66,259 +76,248 @@ router.get('/:code/pdf', async (req, res) => {
 
     if (!shipment) return res.status(404).json({ error: 'Shipment not found' });
 
-    // Generate barcode (CODE128) buffer in-memory
+    // Create barcode buffer (CODE128) in-memory
     const barcodeBuffer = await bwipjs.toBuffer({
       bcid: 'code128',
       text: String(shipment.trackingNumber || code),
       scale: 3,
       height: 50,
       includetext: false,
-      paddingwidth: 10,
-      paddingheight: 10
+      paddingwidth: 6,
+      paddingheight: 6
     });
 
-    // Generate QR buffer with the public tracking URL (in-memory)
+    // Create QR buffer (in-memory)
     const publicTrackingUrl =
       (process.env.PUBLIC_TRACKING_URL || `${req.protocol}://${req.get('host')}/track?code=${encodeURIComponent(shipment.trackingNumber)}`);
     const qrBuffer = await QRCode.toBuffer(publicTrackingUrl, {
       type: 'png',
       margin: 1,
-      width: 160,
-      color: { dark: '#003366', light: '#FFFFFF' } // brand color for QR dark modules
+      width: 140,
+      color: { dark: '#003366', light: '#FFFFFF' }
     });
 
-    // Force download via header (attachment)
+    // prepare response headers before piping
     const filenameSafe = (shipment.trackingNumber || code).replace(/[^a-z0-9\-_\.]/gi, '-');
     res.setHeader('Content-Disposition', `attachment; filename="${filenameSafe}.pdf"`);
     res.setHeader('Content-Type', 'application/pdf');
 
-    // Create doc and pipe to response
+    // Create PDF document
     doc = new PDFDocument({
       size: 'A4',
-      margin: 50,
+      margin: 48,
       info: {
         Title: `Shipment Details - ${shipment.trackingNumber}`,
-        Author: 'Starwood Express Logistics',
-        Subject: 'Shipment Documentation'
+        Author: 'Starwood Express Logistics'
       }
     });
 
-    // Attach robust error handlers BEFORE piping
+    // error handlers
     const onDocError = (err) => {
       console.error('PDF Document error:', err);
-      if (!res.headersSent) {
-        try { res.status(500).json({ error: 'PDF generation failed' }); } catch (e) { /* ignore */ }
-      } else {
-        try { res.destroy(err); } catch (e) { /* ignore */ }
-      }
+      try { if (!res.headersSent) res.status(500).json({ error: 'PDF generation failed' }); } catch (e) {}
+      try { res.destroy(err); } catch (e) {}
     };
     const onResClose = () => {
       if (doc && !doc._ending) {
-        try { doc.end(); } catch (e) { /* ignore */ }
+        try { doc.end(); } catch (e) {}
       }
     };
-
     doc.on('error', onDocError);
     res.on('close', onResClose);
-    res.on('error', (err) => {
-      console.error('Response stream error:', err);
-      onResClose();
-    });
+    res.on('error', (err) => { console.error('Response stream error:', err); onResClose(); });
 
     doc.pipe(res);
 
-    // Build a clean, premium layout (no external images)
-    // 1) Header band (text only, brand color)
-    doc.rect(0, 0, doc.page.width, 80).fill('#003366'); // brand band
-    doc.fillColor('#FFFFFF').fontSize(18).font('Helvetica-Bold').text('STARWOOD EXPRESS LOGISTICS', 50, 28, { align: 'left' });
-    doc.fillColor('#FFFFFF').fontSize(9).font('Helvetica').text('Global Logistics Solutions', 50, 52, { align: 'left' });
+    // ===========================
+    // PAGE 1 - COVER & OVERVIEW
+    // ===========================
+    // Top branding band
+    doc.rect(0, 0, doc.page.width, 72).fill('#003366');
+    doc.fillColor('#FFFFFF').font('Helvetica-Bold').fontSize(18).text('STARWOOD EXPRESS LOGISTICS', 52, 22);
+    doc.font('Helvetica').fontSize(9).fillColor('#E6EEF8').text('Global Logistics Solutions', 52, 44);
 
-    // Move to content area on a new page to avoid overlap
-    doc.addPage();
-    let pageCount = 1;
-    addFooter(doc, pageCount, shipment.trackingNumber);
+    // Title area
+    doc.addPage(); // start fresh page for content with consistent spacing
+    let pageNumber = 1;
+    addFooterSmall(doc, pageNumber, shipment.trackingNumber, publicTrackingUrl);
 
-    // Title + metadata
-    doc.fontSize(18).fillColor('#003366').font('Helvetica-Bold').text('SHIPMENT DETAILS', 50, 60);
-    doc.fontSize(9).fillColor('#666666').font('Helvetica')
-      .text(`Generated: ${new Date().toLocaleString()} | Document ID: ${Math.random().toString(36).substring(2, 10).toUpperCase()}`, 50, 84);
+    doc.fontSize(20).fillColor('#003366').font('Helvetica-Bold').text('SHIPMENT DETAILS', 50, 48);
+    doc.fontSize(9).fillColor('#666666').font('Helvetica').text(`Generated: ${new Date().toLocaleString()}`, 50, 72);
 
-    // Two-column coordinates
-    const leftCol = 50;
-    const rightCol = 320;
-    const topStart = 120;
+    // Two-column layout coordinates (left column smaller)
+    const leftX = 50;
+    const rightX = 320;
+    let cursorY = 100;
 
-    // Left - Tracking Information
-    doc.fontSize(12).fillColor('#003366').font('Helvetica-Bold').text('TRACKING INFORMATION', leftCol, topStart);
-    doc.fontSize(10).font('Helvetica').fillColor('#333333');
+    // TRACKING BLOCK - left column top
+    doc.rect(leftX - 6, cursorY - 6, 240, 110).stroke('#E8EDF3').lineWidth(0.5);
+    doc.fontSize(11).font('Helvetica-Bold').fillColor('#003366').text('TRACKING', leftX, cursorY);
+    drawKeyVal(doc, leftX, leftX + 110, cursorY + 22, 'Tracking Number', shipment.trackingNumber);
+    drawKeyVal(doc, leftX, leftX + 110, cursorY + 40, 'Status', shipment.status);
+    drawKeyVal(doc, leftX, leftX + 110, cursorY + 58, 'Expected', shipment.expectedDeliveryDate || '-');
+    drawKeyVal(doc, leftX, leftX + 110, cursorY + 76, 'Pickup Date', shipment.pickupDate || '-');
 
-    const infoTop = topStart + 25;
-    doc.text('Tracking Number:', leftCol, infoTop);
-    doc.font('Helvetica-Bold').text(shipment.trackingNumber || '-', leftCol + 120, infoTop);
+    // Barcode + QR under tracking block (left col)
+    const codesY = cursorY + 100;
+    try { doc.image(barcodeBuffer, leftX, codesY, { width: 220 }); } catch (e) { console.warn('Barcode draw failed:', e.message); }
+    try { doc.image(qrBuffer, leftX + 230, codesY - 8, { width: 110, height: 110 }); } catch (e) { console.warn('QR draw failed:', e.message); }
+    doc.fontSize(8).fillColor('#666666').text('Scan QR for live tracking', leftX + 230, codesY + 105, { width: 110, align: 'center' });
 
-    doc.font('Helvetica').text('Status:', leftCol, infoTop + 20);
-    const statusColor = (shipment.status === 'Delivered') ? '#28a745' : (shipment.status === 'In Transit') ? '#17a2b8' : (shipment.status === 'Exception') ? '#dc3545' : '#6c757d';
-    doc.font('Helvetica-Bold').fillColor(statusColor).text(shipment.status || '-', leftCol + 120, infoTop + 20);
-    doc.fillColor('#333333');
-
-    doc.font('Helvetica').fillColor('#333333').text('Expected Delivery:', leftCol, infoTop + 40);
-    doc.font('Helvetica-Bold').text(shipment.expectedDeliveryDate || '-', leftCol + 120, infoTop + 40);
-
-    // Embed barcode (from buffer) and QR (from buffer) — still no disk images
-    const codesTop = infoTop + 70;
-    try {
-      doc.image(barcodeBuffer, leftCol, codesTop, { width: 200 });
-    } catch (e) {
-      console.warn('Barcode draw failed (non-fatal):', e.message);
-    }
-    try {
-      doc.image(qrBuffer, leftCol + 220, codesTop - 10, { width: 100, height: 100 });
-    } catch (e) {
-      console.warn('QR draw failed (non-fatal):', e.message);
-    }
-    doc.fontSize(8).font('Helvetica').fillColor('#666666').text('Scan QR code for real-time tracking', leftCol + 220, codesTop + 95, { width: 100, align: 'center' });
-
-    // Right - Shipment Overview
-    doc.fontSize(12).font('Helvetica-Bold').fillColor('#003366').text('SHIPMENT OVERVIEW', rightCol, topStart);
-    const overviewTop = topStart + 25;
-    const overviewData = [
-      { label: 'Origin', value: shipment.origin || '-' },
-      { label: 'Destination', value: shipment.destination || '-' },
-      { label: 'Carrier', value: shipment.carrier || '-' },
-      { label: 'Service Type', value: shipment.shipmentType || '-' },
-      { label: 'Total Weight', value: shipment.weight ? `${shipment.weight} kg` : '-' },
-      { label: 'Package Count', value: shipment.packageCount ?? (shipment.packages ? shipment.packages.length : '-') }
+    // RIGHT column: Shipment Overview
+    cursorY = 100;
+    doc.fontSize(11).font('Helvetica-Bold').fillColor('#003366').text('OVERVIEW', rightX, cursorY);
+    const overview = [
+      ['Origin', shipment.origin || '-'],
+      ['Destination', shipment.destination || '-'],
+      ['Carrier', shipment.carrier || '-'],
+      ['Service', shipment.shipmentType || '-'],
+      ['Mode', shipment.shipmentMode || '-'],
+      ['Total Weight', shipment.weight ? `${shipment.weight} kg` : '-']
     ];
-    overviewData.forEach((item, i) => {
-      const yPos = overviewTop + (i * 15);
-      doc.fontSize(9).font('Helvetica').fillColor('#666666').text(item.label + ':', rightCol, yPos);
-      doc.font('Helvetica-Bold').fillColor('#333333').text(item.value, rightCol + 90, yPos);
+    let overviewY = cursorY + 22;
+    overview.forEach(([k, v]) => {
+      doc.fontSize(9).font('Helvetica').fillColor('#666666').text(k + ':', rightX, overviewY);
+      doc.font('Helvetica-Bold').fillColor('#333333').text(v, rightX + 90, overviewY);
+      overviewY += 14;
     });
 
-    // Shipper & Receiver blocks
-    const detailsTop = codesTop + 120;
-    doc.fontSize(12).font('Helvetica-Bold').fillColor('#003366').text('SHIPPER INFORMATION', leftCol, detailsTop);
-    doc.fontSize(10).font('Helvetica').fillColor('#333333')
-      .text(shipment.shipperName || '-', leftCol, detailsTop + 20)
-      .text(shipment.shipperAddress || '-', leftCol, detailsTop + 35, { width: 240 });
+    // Shipper & Receiver blocks under overview
+    const blocksY = Math.max(codesY + 140, overviewY + 10);
+    doc.fontSize(11).font('Helvetica-Bold').fillColor('#003366').text('SHIPPER', leftX, blocksY);
+    doc.fontSize(9).font('Helvetica').fillColor('#333333').text(shipment.shipperName || '-', leftX, blocksY + 16);
+    doc.fontSize(8).fillColor('#666666').text(shipment.shipperAddress || '-', leftX, blocksY + 30, { width: 240 });
 
-    doc.fontSize(12).font('Helvetica-Bold').fillColor('#003366').text('RECEIVER INFORMATION', rightCol, detailsTop);
-    doc.fontSize(10).font('Helvetica').fillColor('#333333')
-      .text(shipment.receiverName || '-', rightCol, detailsTop + 20)
-      .text(shipment.receiverAddress || '-', rightCol, detailsTop + 35, { width: 240 });
+    doc.fontSize(11).font('Helvetica-Bold').fillColor('#003366').text('RECEIVER', rightX, blocksY);
+    doc.fontSize(9).font('Helvetica').fillColor('#333333').text(shipment.receiverName || '-', rightX, blocksY + 16);
+    doc.fontSize(8).fillColor('#666666').text(shipment.receiverAddress || '-', rightX, blocksY + 30, { width: 240 });
 
-    // Additional details
-    const additionalTop = detailsTop + 80;
-    doc.fontSize(12).font('Helvetica-Bold').fillColor('#003366').text('ADDITIONAL DETAILS', leftCol, additionalTop);
-    const additionalData = [
-      { label: 'Product Name', value: shipment.productName || '-' },
-      { label: 'Quantity', value: shipment.quantity ?? '-' },
-      { label: 'Payment Mode', value: shipment.paymentMode || '-' },
-      { label: 'Freight Cost', value: shipment.freightCost ? `$${shipment.freightCost}` : '-' },
-      { label: 'Carrier Reference', value: shipment.carrierReferenceNo || '-' }
+    // Additional details compact area (bottom of page 1)
+    const bottomLeftY = blocksY + 70;
+    doc.fontSize(10).font('Helvetica-Bold').fillColor('#003366').text('DETAILS', leftX, bottomLeftY);
+    const smallDetails = [
+      ['Product', shipment.productName || '-'],
+      ['Qty', shipment.quantity ?? '-'],
+      ['Payment', shipment.paymentMode || '-'],
+      ['Freight', shipment.freightCost ? `$${shipment.freightCost}` : '-'],
+      ['Carrier Ref', shipment.carrierReferenceNo || '-']
     ];
-    additionalData.forEach((item, i) => {
-      const yPos = additionalTop + 20 + (i * 15);
-      doc.fontSize(9).font('Helvetica').fillColor('#666666').text(item.label + ':', leftCol, yPos);
-      doc.font('Helvetica-Bold').fillColor('#333333').text(item.value, leftCol + 100, yPos);
+    let smallY = bottomLeftY + 18;
+    smallDetails.forEach(([k, v]) => {
+      doc.fontSize(9).font('Helvetica').fillColor('#666666').text(`${k}: ${v}`, leftX, smallY);
+      smallY += 12;
     });
 
-    // Package details table if present (paginated)
-    if (Array.isArray(shipment.packages) && shipment.packages.length > 0) {
-      let packagesTop = additionalTop + 100;
-      doc.fontSize(12).font('Helvetica-Bold').fillColor('#003366').text('PACKAGE DETAILS', leftCol, packagesTop);
-
-      const headerY = packagesTop + 18;
-      // header band (filled)
-      doc.rect(leftCol, headerY - 4, 510, 20).fill('#003366');
-      doc.fillColor('#FFFFFF').fontSize(9)
-        .text('Type', leftCol + 10, headerY)
-        .text('Description', leftCol + 80, headerY)
-        .text('Dimensions', leftCol + 250, headerY)
-        .text('Weight', leftCol + 350, headerY)
-        .text('Qty', leftCol + 420, headerY);
-
-      doc.fillColor('#333333');
-      let tableY = headerY + 24;
-      for (let idx = 0; idx < shipment.packages.length; idx++) {
-        const pkg = shipment.packages[idx];
-        // New page when near bottom
-        if (tableY > doc.page.height - 120) {
-          doc.addPage();
-          pageCount++;
-          addFooter(doc, pageCount, shipment.trackingNumber);
-          tableY = 100;
-        }
-        if (idx % 2 === 0) {
-          doc.rect(leftCol, tableY - 2, 510, 20).fill('#F8F9FA');
-          doc.fillColor('#333333');
-        }
-        doc.fontSize(9).font('Helvetica')
-          .text(pkg.pieceType || '-', leftCol + 10, tableY)
-          .text(pkg.description || '-', leftCol + 80, tableY, { width: 160 })
-          .text(pkg.dimensions || '-', leftCol + 250, tableY)
-          .text(pkg.weight ? `${pkg.weight} kg` : '-', leftCol + 350, tableY)
-          .text(pkg.quantity ?? '-', leftCol + 420, tableY);
-        tableY += 24;
-      }
-    }
-
-    // History pages (if any)
-    if (Array.isArray(shipment.history) && shipment.history.length > 0) {
-      doc.addPage();
-      pageCount++;
-      addFooter(doc, pageCount, shipment.trackingNumber);
-      doc.fontSize(16).font('Helvetica-Bold').fillColor('#003366').text('SHIPMENT HISTORY', 50, 80);
-
-      let historyY = 110;
-      for (let i = 0; i < shipment.history.length; i++) {
-        const h = shipment.history[i];
-        if (historyY > doc.page.height - 120) {
-          doc.addPage();
-          pageCount++;
-          addFooter(doc, pageCount, shipment.trackingNumber);
-          historyY = 80;
-        }
-        doc.circle(70, historyY + 6, 4).fill('#003366');
-        doc.fontSize(11).font('Helvetica-Bold').fillColor('#003366').text(h.status || 'Status update', 90, historyY);
-        doc.fontSize(9).font('Helvetica').fillColor('#666666').text(`${h.date || ''} ${h.time || ''}`, 90, historyY + 14);
-        doc.fontSize(9).font('Helvetica').fillColor('#333333').text(`Location: ${h.location || 'Not specified'}`, 90, historyY + 28, { width: 400 });
-        if (h.remarks) {
-          doc.fontSize(8).fillColor('#666666').text(`Remarks: ${h.remarks}`, 90, historyY + 44, { width: 400 });
-          historyY += 70;
-        } else {
-          historyY += 54;
-        }
-      }
-    }
-
-    // Final summary page
+    // Finish first page -> do NOT add more pages except exactly one more
+    // ===========================
+    // PAGE 2 - PACKAGES + HISTORY (compact)
+    // ===========================
     doc.addPage();
-    pageCount++;
-    addFooter(doc, pageCount, shipment.trackingNumber);
-    doc.fontSize(16).font('Helvetica-Bold').fillColor('#003366').text('DOCUMENT SUMMARY', 50, 80, { align: 'center' });
-    doc.moveTo(50, 100).lineTo(doc.page.width - 50, 100).strokeColor('#DDDDDD').stroke();
-    doc.fontSize(10).font('Helvetica').fillColor('#333333')
-      .text('This document contains confidential shipment information intended solely for the recipient.', 50, 120, { align: 'center', width: doc.page.width - 100 });
-    doc.moveDown();
-    doc.fontSize(10).font('Helvetica-Bold').fillColor('#003366')
-      .text('Starwood Express Logistics Customer Support', 50, 180, { align: 'center' });
-    doc.fontSize(9).font('Helvetica').fillColor('#333333')
-      .text('Email: support@starwoodexpress.com | Phone: +1-800-STARWOOD', 50, 200, { align: 'center' });
-    doc.fontSize(8).fillColor('#666666')
-      .text(`Document generated: ${new Date().toLocaleString()}`, 50, doc.page.height - 80, { align: 'center' })
-      .text(`Tracking Number: ${shipment.trackingNumber}`, 50, doc.page.height - 65, { align: 'center' })
-      .text('© ' + new Date().getFullYear() + ' Starwood Express Logistics. All rights reserved.', 50, doc.page.height - 50, { align: 'center' });
+    pageNumber = 2;
+    addFooterSmall(doc, pageNumber, shipment.trackingNumber, publicTrackingUrl);
 
-    // finalize PDF stream
+    // Page 2 header
+    doc.fontSize(16).font('Helvetica-Bold').fillColor('#003366').text('PACKAGE DETAILS & HISTORY', 50, 48);
+    doc.moveTo(50, 66).lineTo(doc.page.width - 50, 66).strokeColor('#DDDDDD').stroke();
+
+    // Available vertical space for entries (from y=80 to footer area ~ doc.page.height - 110)
+    const topY = 80;
+    const bottomLimit = doc.page.height - 110;
+    let y = topY;
+
+    // PACKAGES TABLE (compact rows)
+    doc.fontSize(12).font('Helvetica-Bold').fillColor('#003366').text('Packages', 50, y);
+    y += 16;
+    // table header row (small)
+    doc.fontSize(9).fillColor('#FFFFFF').font('Helvetica-Bold');
+    // draw header band
+    doc.rect(50, y - 6, doc.page.width - 100, 18).fill('#003366');
+    doc.fillColor('#FFFFFF').text('Type', 56, y - 4);
+    doc.text('Description', 120, y - 4);
+    doc.text('Dimensions', 320, y - 4);
+    doc.text('Weight', 420, y - 4);
+    doc.text('Qty', 480, y - 4);
+    y += 20;
+
+    doc.fillColor('#333333').font('Helvetica').fontSize(9);
+
+    const packages = Array.isArray(shipment.packages) ? shipment.packages : [];
+    // Estimate rows that fit: compute available height
+    const availableHeight = bottomLimit - y;
+    const approxRowHeight = 16;
+    const maxPackageRows = Math.max(0, Math.floor(availableHeight / approxRowHeight / 2)); // allocate about half page for packages
+    const packageRowsToShow = Math.min(packages.length, Math.max(3, maxPackageRows)); // show at least 3 if present
+
+    for (let i = 0; i < packageRowsToShow; i++) {
+      const pkg = packages[i];
+      // alternate background subtle
+      if (i % 2 === 0) {
+        doc.rect(50, y - 4, doc.page.width - 100, 16).fill('#F8F9FA');
+        doc.fillColor('#333333');
+      }
+      doc.text(pkg.pieceType || '-', 56, y);
+      doc.text((pkg.description || '-').slice(0, 40), 120, y, { width: 180 });
+      doc.text((pkg.dimensions || '-'), 320, y);
+      doc.text(pkg.weight ? `${pkg.weight} kg` : '-', 420, y);
+      doc.text(String(pkg.quantity ?? '-'), 480, y);
+      y += 18;
+    }
+
+    // If we didn't show all packages, show a compact message
+    if (packages.length > packageRowsToShow) {
+      const remaining = packages.length - packageRowsToShow;
+      doc.fontSize(9).fillColor('#666666').text(`+ ${remaining} more package(s). View full list at tracking page.`, 56, y + 6);
+      y += 22;
+    } else {
+      y += 8;
+    }
+
+    // HISTORY (compact timeline)
+    doc.fontSize(12).font('Helvetica-Bold').fillColor('#003366').text('History', 50, y);
+    y += 16;
+
+    const history = Array.isArray(shipment.history) ? shipment.history : [];
+    // Remaining vertical space for history
+    const remainingHeightForHistory = bottomLimit - y;
+    const approxHistoryRow = 34; // compact rows
+    const maxHistoryRows = Math.max(0, Math.floor(remainingHeightForHistory / approxHistoryRow));
+    const historyToShow = Math.min(history.length, Math.max(1, Math.min(10, maxHistoryRows))); // show at least 1
+
+    for (let i = 0; i < historyToShow; i++) {
+      const h = history[i];
+      // small timeline marker
+      doc.circle(60, y + 8, 4).fill('#003366');
+      doc.fontSize(10).fillColor('#003366').font('Helvetica-Bold').text(h.status || '-', 74, y);
+      doc.fontSize(8).fillColor('#666666').font('Helvetica').text(`${h.date || ''} ${h.time || ''}`, 74, y + 12);
+      const locationText = `Location: ${h.location || 'Not specified'}`;
+      doc.fontSize(8).fillColor('#333333').text(locationText, 220, y);
+      if (h.remarks) {
+        doc.fontSize(8).fillColor('#666666').text(`Remarks: ${(h.remarks || '').slice(0, 120)}`, 74, y + 22, { width: doc.page.width - 140 });
+      }
+      y += approxHistoryRow;
+    }
+
+    if (history.length > historyToShow) {
+      const rem = history.length - historyToShow;
+      doc.fontSize(9).fillColor('#666666').text(`+ ${rem} more history entries. See full history at:`, 56, y + 6);
+      doc.fontSize(8).fillColor('#003366').text(publicTrackingUrl, 56, y + 20, { width: doc.page.width - 120 });
+      y += 36;
+    }
+
+    // Final small summary block (bottom)
+    doc.fontSize(9).fillColor('#333333').font('Helvetica-Bold').text('Need help?', 50, doc.page.height - 140);
+    doc.fontSize(8).fillColor('#666666').text('Contact Starwood Express Logistics Customer Support', 50, doc.page.height - 126);
+    doc.fontSize(8).fillColor('#003366').text('support@starwoodexpress.com | +1-800-STARWOOD', 50, doc.page.height - 112);
+
+    // finalize
     doc.end();
   } catch (err) {
-    console.error('PDF generation error (route):', err);
+    console.error('PDF generation error (2-page):', err);
     try {
       if (!res.headersSent) return res.status(500).json({ error: 'Failed to generate PDF' });
       res.destroy(err);
     } catch (e) {
-      console.error('Error while handling PDF error:', e);
+      console.error('Error handling PDF exception:', e);
     }
   }
 });
