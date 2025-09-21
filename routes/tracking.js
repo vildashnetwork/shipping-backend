@@ -64,7 +64,7 @@ router.get('/:code/pdf', async (req, res) => {
         doc.pipe(res);
 
         // --- Cover Page ---
-        doc.image('public/starwood-logo.png', 50, 40, { width: 120 }); // brand logo
+        // doc.image('public/starwood-logo.png', 50, 40, { width: 120 }); 
         doc.fontSize(22).fillColor('#1E3A8A').text('Starwood Express Logistics', 200, 50, { align: 'right' });
         doc.moveDown(2);
 
