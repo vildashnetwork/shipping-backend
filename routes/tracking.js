@@ -41,83 +41,59 @@ router.get('/:code/pdf', async (req, res) => {
 
         if (!shipment) return res.status(404).json({ error: 'Shipment not found' });
 
-        // Create barcode image (Code128) buffer using bwip-js
+        // Barcode
         const barcodeBuffer = await bwipjs.toBuffer({
             bcid: 'code128',
             text: String(shipment.trackingNumber || code),
-            scale: 3,     // 3x scaling
-            height: 50,   // bar height, in px
-            includetext: false,
-            paddingwidth: 10,
-            paddingheight: 10
+            scale: 3,
+            height: 50,
+            includetext: false
         });
 
-        // Create QR code buffer (link back to a public tracking page)
+        // QR Code
         const publicTrackingUrl =
             (process.env.PUBLIC_TRACKING_URL || `${req.protocol}://${req.get('host')}/track?code=${encodeURIComponent(shipment.trackingNumber)}`);
-        const qrBuffer = await QRCode.toBuffer(publicTrackingUrl, { type: 'png', margin: 1, width: 200 });
+        const qrBuffer = await QRCode.toBuffer(publicTrackingUrl, { type: 'png', margin: 1, width: 180 });
 
-        // Prepare PDF response headers
+        // PDF Headers
         const filenameSafe = (shipment.trackingNumber || code).replace(/[^a-z0-9\-_\.]/gi, '-');
         res.setHeader('Content-Disposition', `attachment; filename="${filenameSafe}.pdf"`);
         res.setHeader('Content-Type', 'application/pdf');
 
-        // Create PDF
-        const doc = new PDFDocument({ size: 'A4', margin: 48 });
-
-        // Stream PDF to response
+        const doc = new PDFDocument({ size: 'A4', margin: 50 });
         doc.pipe(res);
 
-        // --- PDF content layout ---
-        // Header
-        doc.fontSize(20).text('Shipment Details', { align: 'center' });
-        doc.moveDown(0.5);
-        doc.fontSize(10).fillColor('gray').text(`Generated: ${new Date().toISOString()}`, { align: 'center' });
-        doc.moveDown(1.2);
+        // --- Cover Page ---
+        doc.image('public/starwood-logo.png', 50, 40, { width: 120 }); // brand logo
+        doc.fontSize(22).fillColor('#1E3A8A').text('Starwood Express Logistics', 200, 50, { align: 'right' });
+        doc.moveDown(2);
 
-        // Two-column layout: left summary + barcode/qr, right big details
-        const leftWidth = 200;
-        const startX = doc.x;
-        const startY = doc.y;
+        doc.fontSize(18).fillColor('#000').text('Shipment Report', { align: 'center', underline: true });
+        doc.moveDown(1);
+        doc.fontSize(12).fillColor('gray').text(`Generated: ${new Date().toLocaleString()}`, { align: 'center' });
+        doc.moveDown(2);
 
-        // Left box: tracking and barcode + QR
-        doc.rect(startX - 8, startY - 8, leftWidth + 16, 300).strokeOpacity(0.06).stroke('#000000');
-        doc.fontSize(12).fillColor('black').text(`Tracking: ${shipment.trackingNumber || '-'}`, startX, startY);
-        doc.moveDown(0.5);
-        doc.fontSize(10).fillColor('gray').text(`Status: ${shipment.status || '-'}`);
-        doc.moveDown(0.5);
-        doc.fontSize(10).fillColor('gray').text(`Expected: ${shipment.expectedDeliveryDate || shipment.estimatedDelivery || '-'}`);
-        doc.moveDown(0.8);
+        // Tracking + QR/Barcode
+        doc.rect(50, 160, 500, 120).fillOpacity(0.05).fill('#1E3A8A').stroke('#1E3A8A');
+        doc.fillColor('#000').fontSize(14).text(`Tracking Number: ${shipment.trackingNumber}`, 70, 180);
+        doc.fontSize(12).fillColor('gray').text(`Status: ${shipment.status || '-'}`, 70, 200);
+        doc.text(`Expected Delivery: ${shipment.expectedDeliveryDate || shipment.estimatedDelivery || '-'}`, 70, 220);
 
-        // Draw barcode
-        const barcodeY = doc.y;
-        doc.image(barcodeBuffer, startX, barcodeY, { width: leftWidth - 20, align: 'center' });
-        doc.moveDown(5);
+        doc.image(barcodeBuffer, 350, 175, { width: 180 });
+        doc.image(qrBuffer, 250, 320, { width: 100, height: 100 });
+        doc.fontSize(8).fillColor('gray').text(publicTrackingUrl, 50, 430);
 
-        // Draw QR code to the right of barcode (or below, if narrow)
-        const qrX = startX;
-        const qrY = barcodeY + 80;
-        doc.image(qrBuffer, qrX, qrY, { width: 110, height: 110 });
+        doc.addPage();
 
-        // Shareable URL text
-        doc.fontSize(8).fillColor('gray').text(publicTrackingUrl, startX, qrY + 115, { width: leftWidth - 10, align: 'left' });
-
-        // Move cursor to the right column
-        const rightX = startX + leftWidth + 24;
-        doc.x = rightX;
-        doc.y = startY;
-
-        // Right column: full details
-        doc.fontSize(14).fillColor('black').text('Full Shipment Information', { underline: true });
-        doc.moveDown(0.4);
-        doc.fontSize(10).fillColor('black');
+        // --- Shipment Details ---
+        doc.fontSize(16).fillColor('#1E3A8A').text('Full Shipment Information', { underline: true });
+        doc.moveDown();
 
         const pushKeyVal = (label, value) => {
-            doc.font('Helvetica-Bold').text(`${label}: `, { continued: true, width: 120 });
-            doc.font('Helvetica').text(String(value ?? '-'));
+            doc.font('Helvetica-Bold').fontSize(11).fillColor('#000').text(`${label}: `, { continued: true });
+            doc.font('Helvetica').fontSize(11).fillColor('gray').text(String(value ?? '-'));
         };
 
-        // Basic fields
         pushKeyVal('Shipper Name', shipment.shipperName);
         pushKeyVal('Shipper Address', shipment.shipperAddress);
         pushKeyVal('Receiver Name', shipment.receiverName);
@@ -127,67 +103,54 @@ router.get('/:code/pdf', async (req, res) => {
         pushKeyVal('Carrier', shipment.carrier || '-');
         pushKeyVal('Shipment Type', shipment.shipmentType || '-');
         pushKeyVal('Shipment Mode', shipment.shipmentMode || '-');
-        pushKeyVal('Carrier Ref No', shipment.carrierReferenceNo || '-');
-        pushKeyVal('Product Name', shipment.productName || '-');
-        pushKeyVal('Quantity', shipment.quantity ?? '-');
-        pushKeyVal('Payment Mode', shipment.paymentMode || '-');
-        pushKeyVal('Freight Cost', shipment.freightCost ?? '-');
-        pushKeyVal('Package Count', shipment.packageCount ?? (shipment.packages ? shipment.packages.length : '-'));
         pushKeyVal('Weight (kg)', shipment.weight ?? '-');
-        pushKeyVal('Departure Time', shipment.departureTime || '-');
-        pushKeyVal('Pickup Date', shipment.pickupDate || '-');
-        pushKeyVal('Pickup Time', shipment.pickupTime || '-');
-        pushKeyVal('Comments', shipment.comments || '-');
+        doc.moveDown();
 
-        doc.moveDown(0.6);
-
-        // Packages table-like section
+        // --- Packages ---
         if (Array.isArray(shipment.packages) && shipment.packages.length > 0) {
-            doc.fontSize(12).text('Packages:', { underline: true });
-            doc.moveDown(0.4);
-            shipment.packages.forEach((pkg, idx) => {
-                doc.fontSize(10).font('Helvetica-Bold').text(`Package ${idx + 1}`, { continued: true });
-                doc.font('Helvetica').text('');
-                doc.fontSize(9).text(`  - Quantity: ${pkg.quantity ?? '-'}`);
-                doc.text(`  - Type: ${pkg.pieceType ?? '-'}`);
-                doc.text(`  - Description: ${pkg.description ?? '-'}`);
-                doc.text(`  - Dimensions: ${pkg.dimensions ?? '-'}`);
-                doc.text(`  - Weight: ${pkg.weight ?? '-'}`);
-                doc.moveDown(0.2);
+            doc.fontSize(14).fillColor('#1E3A8A').text('Package Breakdown', { underline: true });
+            doc.moveDown(0.5);
+            shipment.packages.forEach((pkg, i) => {
+                doc.fontSize(11).fillColor('#000').text(`📦 Package ${i + 1}`);
+                doc.fontSize(10).fillColor('gray').text(`   - Quantity: ${pkg.quantity ?? '-'}`);
+                doc.text(`   - Type: ${pkg.pieceType ?? '-'}`);
+                doc.text(`   - Dimensions: ${pkg.dimensions ?? '-'}`);
+                doc.text(`   - Weight: ${pkg.weight ?? '-'}`);
+                doc.moveDown(0.3);
             });
         }
 
-        doc.moveDown(0.5);
+        doc.addPage();
 
-        // History
+        // --- History Timeline ---
         if (Array.isArray(shipment.history) && shipment.history.length > 0) {
-            doc.addPage(); // Put history on a separate page to avoid cramped first page
-            doc.fontSize(16).text('Shipment History', { underline: true });
-            doc.moveDown(0.6);
-            shipment.history.forEach((h, idx) => {
-                doc.fontSize(10).font('Helvetica-Bold').text(`${idx + 1}. ${h.date || '-'} ${h.time || ''}`);
-                doc.font('Helvetica').text(`   Status: ${h.status || '-'}`);
+            doc.fontSize(16).fillColor('#1E3A8A').text('Shipment History', { underline: true });
+            doc.moveDown(1);
+            shipment.history.forEach((h, i) => {
+                doc.fontSize(11).fillColor('#000').text(`${i + 1}. ${h.date || '-'} ${h.time || ''}`);
+                doc.fontSize(10).fillColor('gray').text(`   Status: ${h.status || '-'}`);
                 doc.text(`   Location: ${h.location || '-'}`);
                 doc.text(`   Updated By: ${h.updatedBy || '-'}`);
                 doc.text(`   Remarks: ${h.remarks || '-'}`);
-                doc.moveDown(0.2);
+                doc.moveDown(0.4);
             });
         }
 
         // Footer
-        doc.addPage(); // optionally separate final page with summary (or comment out if not desired)
-        doc.fontSize(10).text('This document was generated by the shipping system.', { align: 'center' });
+        doc.addPage();
+        doc.fontSize(10).fillColor('gray').text(
+            'This document was generated by Starwood Express Logistics Shipping System.',
+            { align: 'center' }
+        );
         doc.moveDown(0.5);
-        doc.fontSize(8).fillColor('gray').text(`Tracking: ${shipment.trackingNumber} • Generated: ${new Date().toISOString()}`, { align: 'center' });
+        doc.fontSize(8).text(`© ${new Date().getFullYear()} Starwood Express Logistics. All Rights Reserved.`, { align: 'center' });
 
-        // finalize PDF
         doc.end();
-
-        // Note: we don't call res.end() because doc.pipe(res) will end the stream when doc.end() is called.
     } catch (err) {
         console.error('PDF generation error:', err);
         return res.status(500).json({ error: 'Failed to generate PDF' });
     }
 });
+
 
 export default router;
