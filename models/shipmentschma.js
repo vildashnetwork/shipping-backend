@@ -98,7 +98,7 @@ const HistorySchema = new Schema({
 
 // Shipment Schema
 const ShipmentSchema = new Schema({
-    trackingNumber: { type: String, required: true},
+    trackingNumber: { type: String, required: true, unique: true},
     shipperName: { type: String, required: true },
     shipperAddress: { type: String, required: true },
     receiverName: { type: String, required: true },
